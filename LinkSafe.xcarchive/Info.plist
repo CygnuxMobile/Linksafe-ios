@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ApplicationProperties</key>
+	<dict>
+		<key>ApplicationPath</key>
+		<string>Applications/LinkSafe.app</string>
+		<key>Architectures</key>
+		<array>
+			<string>arm64</string>
+		</array>
+		<key>CFBundleIdentifier</key>
+		<string>com.linksafe.2nerds</string>
+		<key>CFBundleShortVersionString</key>
+		<string>5.4.7</string>
+		<key>CFBundleVersion</key>
+		<string>7</string>
+		<key>SigningIdentity</key>
+		<string>Apple Distribution: Linksafe Pty Ltd (MD8Q2D85LB)</string>
+		<key>Team</key>
+		<string>MD8Q2D85LB</string>
+	</dict>
+	<key>ArchiveVersion</key>
+	<integer>2</integer>
+	<key>CreationDate</key>
+	<date>2023-10-23T09:26:55Z</date>
+	<key>Name</key>
+	<string>LinkSafe</string>
+	<key>SchemeName</key>
+	<string>LinkSafe</string>
+</dict>
+</plist>

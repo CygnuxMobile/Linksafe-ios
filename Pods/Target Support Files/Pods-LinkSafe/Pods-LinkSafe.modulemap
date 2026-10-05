@@ -1,0 +1,6 @@
+module Pods_LinkSafe {
+  umbrella header "Pods-LinkSafe-umbrella.h"
+
+  export *
+  module * { export * }
+}

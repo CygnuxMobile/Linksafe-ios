@@ -1,0 +1,226 @@
+//
+//  LinkSafePrefixHeader.pch
+//  LinkSafe
+//
+//  Created by Hitesh Gs on 7/9/16.
+//  Copyright © 2016 CygnusSoftTech All rights reserved.
+//
+
+#ifndef LinkSafePrefixHeader_pch
+#define LinkSafePrefixHeader_pch
+
+#import <UIKit/UIKit.h>
+#import "Common.h"
+#import "AppDelegate.h"
+#import "ActionSheetPicker.h"
+//#import <TestFairy/TestFairy.h>
+#import "JZTouchIDManager.h"
+// Include any system framework and library headers here that should be included in all compilation units.
+// You will also need to set the Prefix Header build setting of one or more of your targets to reference this file.
+
+//Production Server URL
+#define WEB_SERVICE_URL   @"https://api.linksafe.com.au/7.0/VisitorManagementApp/"
+//Testing Server URL
+#define TESTING_WEB_SERVICE_URL   @"https://testing.api.linksafe.com.au/7.0/VisitorManagementApp/"
+
+//APIS
+//-------done--------
+#define REQUEST_LOGIN                   @"Login"
+#define REQUEST_LOGOUT                  @"Logout"
+#define REQUEST_GET_CONFIG              @"GetConfig"
+#define REQUEST_SEARCH_REGISTER         @"SearchRegister"
+#define REQUEST_GET_CONTACTS            @"GetContacts"
+#define GET_WORK_PERMITTYPES            @"GetWorkPermitTypes"
+#define CREATE_WORK_PERMIT_FORM         @"CreateWorkPermitForm"
+#define GET_WORK_PERMITTYPES            @"GetWorkPermitTypes"
+#define SIGNOUT_VISITOR                 @"SignOutUsingRegister"
+#define SIGNOUT_USING_PIN               @"SignOutUsingPin"
+#define SEARCH_SIGNOUT_VISITOR          @"SearchSignedInVisitors"
+
+#define REQUEST_VALIDATE_PASSWORD                   @"ValidatePassword"
+#define REQUEST_SIGN_IN_CONTRACTOR                  @"SignInContractor"
+#define REQUEST_CANCEL_DECLINE_ENTRY                @"DeclineEntry"
+#define REQUEST_VISITORSIGN                         @"SignInVisitor"
+#define REQUEST_AttachWorkPermit                    @"AttachWorkPermitDocument"
+#define REQUEST_DeleteWorkPermit                    @"DeleteWorkPermitDocument"
+#define REQUEST_GET_INDUCTION_CONTENT               @"GetInductionContent"
+#define REQUEST_SIGN_OUT_USING_SCAN                 @"SignOutUsingScan"
+#define REQUEST_GET_REGISTER_HISTORY                @"GetRegisterHistory"
+#define REQUEST_GET_REGISTRATION_DETAILS            @"GetRegistrationDetails"
+#define REQUEST_GET_WORK_PERMIT_TYPES               @"GetWorkPermitTypes"
+#define REQUEST_SAVE_WORK_PERMIT_DETAILS            @"SaveWorkPermitDetails"
+#define REQUEST_SUBMIT_WORK_PERMIT_FORM             @"SubmitWorkPermitForm"
+#define REQUEST_GETWallpapers                       @"GetWallpapers"
+#define REQUEST_SignInException                     @"SignInException"
+#define REQUEST_SaveWorkPermitSections              @"SaveWorkPermitSection"
+#define REQUEST_ValidatePassword                    @"ValidatePassword"
+#define REQUEST_GET_CONTRACTOR_JOBS                 @"GetWorkOrders"
+#define REQUEST_GET_MESSAGE_BOARDS                  @"GetMessageBoards"
+#define GET_WORK_PERMIT_QUESTIONS                   @"GetWorkPermitQuestions"
+#define GET_PRE_REGISTRATION_DETAILS                @"GetPreRegistrationDetails"
+#define API_VALIDATE_VISITOR                        @"ValidateVisitor"
+
+#define kSpotCheckWorkerSearch                      @"SpotCheckWorkerSearch"
+#define kGetPinFromQrCodeForSpotCheck               @"GetPinFromQrCodeForSpotCheck"
+#define kGetSpotCheckWorkerDetails                  @"GetSpotCheckWorkerDetails"
+
+#define API_GET_SIGNOUT_HANDLE                      @"GetSignOutHandle"
+#define API_FIND_CONTRACTOR                         @"FindContractor"
+#define API_VALIDATE_CONTRACTOR                     @"ValidateContractor"
+#define API_VALIDATE_SPOT_CHECK                     @"ValidateSpotCheck"
+#define API_SIGN_OUT_CONTRACTOR                     @"SignOutContractor"
+#define API_SAVE_SIGN_OUT_ANSWERS                   @"SaveSignOutAnswers"
+#define API_GET_SIGN_OUT_DOCUMENTS                  @"GetSignOutDocumentsConfig"
+#define API_SAVE_SIGN_OUT_DOCUMENTS                 @"SaveSignOutDocuments"
+#define API_SIGN_OUT_VISITOR                        @"SignOutVisitor"
+#define API_GET_INDUCTION_CONFIG                    @"GetInductionConfig"
+#define API_NOTIFY_INDUCTION_COMPLETED              @"NotifyInductionCompleted"
+#define API_GET_STICKER_BITMAPS                     @"GetStickerBitmaps"
+#define API_GET_COMPLIANCE_ITEMS                    @"GetComplianceItems"
+#define API_GET_LOGIN_CONFIGUE                      @"GetLoginConfig"
+#define API_SEND_COMPLIANCE_ITEM_EMAIL              @"SendComplianceItemEmail"
+
+#define ACCEPTABLE_CHARACTERS           @" ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-'"
+#define TEMPERATURE_ACCEPTABLE_CHARACTERS  @"0123456789."
+#define MOBILE_ACCEPTABLE_CHARACTERS    @"0123456789"
+
+#define Select_App_Colour()     [UIColor colorWithRed:108.0f/255.0f green:228.0f/255.0f blue:169.0f/255.0f alpha:1.0f]
+
+//Constant
+#define Day_Seconds 86400
+
+//Names
+#define IS_IOS_8_OR_LATER [[UIDevice currentDevice].systemVersion floatValue]>=8.0
+
+#define USER_TOKEN [[USER_DEFAULT valueForKey:USER_DATA] valueForKey:@"token"]
+
+#define USER_ID [[USER_DEFAULT valueForKey:USER_DATA] valueForKey:@"customer_id"]
+
+//Lable
+#define LBL_Already_Registered  @"Already Registered?"
+#define LBL_New_Registration    @"New Registration"
+#define LBL_Pre_Registred       @"Pre-Registered"
+
+
+//UserData Store
+#define SITE_DATA           @"SITE_DATA"
+
+#define ERROR_STATUS            @"0"
+#define SUCCESS_STATUS          @"1"
+#define INVALID_TOKEN_STATUS    @"2"
+
+#define USER_DEFAULT            [NSUserDefaults standardUserDefaults]
+
+#define SCREEN_WIDTH            [UIScreen mainScreen].bounds.size.width
+#define SCREEN_HEIGHT           [UIScreen mainScreen].bounds.size.height
+
+//Param Key
+
+#define KEY_PASSWORD        @"Password"
+#define KEY_SiteUser        @"Username"
+#define KEY_Remember_PASSWORD        @"RememberPassword"
+#define KEY_Remember_SiteUser        @"RememberUsername"
+#define KEY_TOKEN           @"token"
+#define KEY_SUCCESS         @"success"
+#define KEY_VALID           @"isValid"
+#define KEY_WALLPAPER       @"wallpapers"
+
+#define VAL_SWITCH          @"contractorPermissionstate"
+
+#define VAL_DONE            @"isallfine"
+
+#define KEY_CONTACT_ID      @"contactID"
+#define KEY_WORK_Location   @"WorkLocation"
+#define KEY_CUSTOM_QUE_TEXT @"customQuestionText"
+#define KEY_CUSTOM_QUE_ANS  @"customQuestionAnswer"
+#define KEY_WORK_OrderID    @"workOrderID"
+#define KEY_ERROR_MESSAGE   @"errorMessage"
+#define KEY_HELP_MESSAGE    @"helpfulErrorMessage"
+#define KEY_FIRST_NAME      @"firstName"
+#define KEY_LAST_NAME       @"lastName"
+#define KEY_REMMBERME       @"remberMe"
+#define KEY_DEVICE_PHONE    @"phone"
+#define KEY_DEVICE_TABLET   @"tablet"
+#define KEY_FROM_SEARCH     @"isFromSearch"
+#define KEY_CONTRACTOR_PIN  @"ContractorPin"
+#define KEY_AuthorizedBy    @"authorisedBy"
+#define KEY_Notes           @"notes"
+#define KEY_PHOTODATA       @"ContractorPin"
+#define KEY_SIGNOUTHANDLE   @"signOutHandle"
+#define KEY_VISITORTYPEID   @"visitorTypeID"
+
+#define KEY_IsEnvironmentOptionVisible           @"isEnvironmentOptionVisible"
+#define KEY_ENVIRONMENT_OPTION                   @"DeviceWiseTestEnviromentSetting"
+
+#define KEY_PIN             @"pin"
+#define KEY_MOBILE             @"mobile"
+
+#define KEY_PHOTO_URI       @"photoUri"
+#define KEY_IMAGE_MOBILE    @"thumbnailUrl"
+#define KEY_IMAGE_TABLET    @"fullSizeUrl"
+#define KEY_CAMERA          @"CamereSetting"
+#define KEY_QRCodeCam       @"BarodeSetting"
+#define KEY_LOGO            @"internalScreenLogoUrl"
+#define KEY_HOME_LOGO       @"homeScreenLogoUrl"
+
+#define KEY_REGISTERATION_ID @"registrationID"
+
+#define KEY_PERMIT_TYPES_REQUIRED   @"permitTypesRequired"
+#define KEY_PERMIT_TYPE_ID          @"permitTypeID"
+#define KEY_WORKPERMIT_FORM_ID      @"workPermitFormID"
+#define VALUE_CAMERA_FRONT          @"Front"
+#define VALUE_CAMERA_REAR           @"Rear"
+#define CAMERA_SETTINGS             @"camera_settings"
+#define KEY_WORK_ORDERS             @"workOrders"
+
+
+#define KEY_SignInHandle            @"signInHandle"
+#define KEY_REGISTRATION_TYPE       @"registrationType"
+#define KEY_EVENT_TYPE              @"eventType"
+
+
+#define KEY_VISITOR_TYPE_BEHAVE              @"visitorTypeBehaviour"
+#define KEY_HOME_SCREEN_LOGO_POSIITON          @"homeScreenLogoAlignment"
+#define KEY_INTERNAL_SCREEN_LOGO_POSIITON          @"internalScreenLogoAlignment"
+#define KEY_IS_SPOT_CHECKUSER          @"isSpotCheckUser"
+#define KEY_SPOT_CHECK_SITES          @"spotCheckSites"
+#define KEY_TOUCH_DATA          @"touchData"
+#define KEY_IS_WORK_ENABLED          @"isWorkTypeEnabled"
+#define KEY_WORK_TYPE          @"workTypes"
+#define KEY_WORK_TYPE_QUESTION_TEXT          @"WorkTypeQuestionText"
+#define KEY_WORK_TYPE_TEXT_LABEL          @"WorkTypeTextLabel"
+#define KEY_MESSAGE_BOARDS          @"messageBoards"
+
+//Notification Key
+#define N_UpdateTime                @"updatelatesttime"
+#define N_HomeUpdate                @"updatelatehomescreenupdate"
+#define N_PopMe                     @"popmefromselection"
+#define N_UpdateBackgroundImages    @"updatebackgroundimages"
+#define N_UpdateSideMenuScreen      @"updateSideMenuScreen"
+
+
+//File name
+#define F_BGFileName                @"linksafebg.png"
+#define F_InternalBGFileName        @"linksafeInternalBg.png"
+#define F_LOGOFileName              @"linksafelogo.png"
+
+
+typedef void(^callbackwithDic)(NSMutableDictionary *);
+typedef void(^callbackwithImage)(UIImage *image);
+
+#define kTimePassedAfterBGDownload      @"TimePassedAfterBGDownload"
+#define kIsFromLoginScreen              @"isFromLoginScreen"
+
+#define KEY_SignInAcceptanceMessage             @"signInAcceptanceMessage"
+#define KEY_SignInCompletionMessage             @"signInCompletionMessage"
+#define KEY_IsRiskAssessmentUploadRequired      @"isRiskAssessmentUploadMandatory"
+#define KEY_IsSwmsUploadRequired                @"isSwmsUploadMandatory"
+#define KEY_WorkPermitIncorrectAnswerMessage    @"workPermitIncorrectAnswerMessage"
+#define KEY_IsWorkOrdersScreenVisible           @"isWorkOrdersScreenVisible"
+
+#define kTouchID             @"isTouchEnable"
+#define kNewLogin            @"isNewLogin"
+#define kPrinterStatus       @"isPronterOkey"
+#define kPrinterMessage      @"isPronterMessage"
+
+#endif /* LinkSafePrefixHeader_pch */
