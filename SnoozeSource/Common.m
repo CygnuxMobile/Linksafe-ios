@@ -1094,6 +1094,10 @@
 
 + (BRLMChannel *) prepareForPtp
 {
+#if TARGET_OS_SIMULATOR
+    // Brother SDK is not linked in simulator builds (no arm64-simulator slice); printing is device-only.
+    return nil;
+#else
     BRLMChannel *_ptp;
     NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
     NSString *selectedDevice = nil;
@@ -1114,6 +1118,7 @@
         //        NSAssert(false, @"BRLMChannelType error");
     }
     return _ptp;
+#endif
 }
 
 

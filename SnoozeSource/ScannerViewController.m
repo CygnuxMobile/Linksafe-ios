@@ -14,7 +14,7 @@
 #define IDIOM    UI_USER_INTERFACE_IDIOM()
 #define IPAD     UIUserInterfaceIdiomPad
 
-@interface ScannerViewController ()
+@interface ScannerViewController () <AVCaptureMetadataOutputObjectsDelegate>
 
 @property (strong, nonatomic) NSMutableArray * foundBarcodes;
 @property (weak, nonatomic) IBOutlet UIView *previewView;
@@ -31,15 +31,25 @@
     AVCaptureMetadataOutput *_metadataOutput;
     BOOL _hasScanned;
     UIView *_scanLineView;
+    dispatch_queue_t _sessionQueue;   // all AVCaptureSession configuration + start/stop happen here
+    BOOL _sessionConfigured;          // only touched on _sessionQueue
+    BOOL _isVisible;
+    BOOL _showDeniedAlertOnAppear;
+    id _rotationCoordinator; // AVCaptureDeviceRotationCoordinator (iOS 17+)
 }
+
+static void *ScannerRotationCoordinatorContext = &ScannerRotationCoordinatorContext;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     [FIRAnalytics logEventWithName:@"Scanner" parameters:@{@"onload": @"37"}];
-
-    [self setupCaptureSession];
+    
+    // -[AVCaptureSession startRunning]/stopRunning block; Apple requires them off the main thread.
+    _sessionQueue = dispatch_queue_create("com.linksafe.scanner.session", DISPATCH_QUEUE_SERIAL);
+    _captureSession = [[AVCaptureSession alloc] init];
+    _previewLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession:_captureSession];
+    _previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     _previewLayer.frame = _previewView.bounds;
-    _previewLayer.connection.videoOrientation = [self videoOrientationFromCurrentDeviceOrientation:[UIApplication sharedApplication].statusBarOrientation];
     [_previewView.layer addSublayer:_previewLayer];
     self.foundBarcodes = [[NSMutableArray alloc] init];
     
@@ -53,6 +63,18 @@
      selector:@selector(applicationDidEnterBackground:)
      name:UIApplicationDidEnterBackgroundNotification
      object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(sessionWasInterrupted:)
+                                                 name:AVCaptureSessionWasInterruptedNotification
+                                               object:_captureSession];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(sessionInterruptionEnded:)
+                                                 name:AVCaptureSessionInterruptionEndedNotification
+                                               object:_captureSession];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(sessionRuntimeError:)
+                                                 name:AVCaptureSessionRuntimeErrorNotification
+                                               object:_captureSession];
     
     self.allowedBarcodeTypes = [NSMutableArray new];
     [self.allowedBarcodeTypes addObject:@"org.iso.QRCode"];
@@ -67,6 +89,8 @@
     [self.allowedBarcodeTypes addObject:@"org.iso.Code128"];
     
     _hasScanned = NO;
+    
+    [self requestCameraAccessAndConfigure];
 }
 
 - (void)viewWillAppear:(BOOL)animated
@@ -79,12 +103,22 @@
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    _isVisible = YES;
+    if (_showDeniedAlertOnAppear) {
+        _showDeniedAlertOnAppear = NO;
+        [self showCameraAccessDeniedAlert];
+        return;
+    }
+    // The preview layer is in a window now, so its real interface orientation is known.
+    [self setupRotationCoordinator];
+    [self updatePreviewOrientation];
     [self startRunning];
     [self startScanLineAnimation];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    _isVisible = NO;
     self.navigationItem.title = @"";
     [self stopRunning];
     [self stopScanLineAnimation];
@@ -94,59 +128,129 @@
     [super viewDidLayoutSubviews];
     self.previewView.frame = self.view.bounds;
     _previewLayer.frame = self.previewView.bounds;
+    [self updatePreviewOrientation];
     if (_running && !_hasScanned) {
         [self startScanLineAnimation];
     }
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (_rotationCoordinator) {
+        [_rotationCoordinator removeObserver:self forKeyPath:@"videoRotationAngleForHorizonLevelPreview" context:ScannerRotationCoordinatorContext];
+    }
+    AVCaptureSession *session = _captureSession;
+    if (session.isRunning && _sessionQueue) {
+        dispatch_async(_sessionQueue, ^{
+            [session stopRunning];
+        });
+    }
+}
+
+#pragma mark - Camera permission
+
+// Ask for camera access BEFORE configuring the session. Without this, a fresh install
+// (e.g. a new iPad) can show a black preview after the user taps "Allow".
+- (void)requestCameraAccessAndConfigure {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+    NSLog(@"[Scanner] Camera authorization status: %ld", (long)status);
+    if (status == AVAuthorizationStatusNotDetermined) {
+        // Hold the session queue until the user answers, so configuration waits for access.
+        dispatch_suspend(_sessionQueue);
+        dispatch_queue_t queue = _sessionQueue;
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
+            NSLog(@"[Scanner] Camera access granted: %@", granted ? @"YES" : @"NO");
+            dispatch_resume(queue);
+        }];
+    }
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(_sessionQueue, ^{
+        [weakSelf configureSessionOnSessionQueue];
+    });
+}
+
+- (void)showCameraAccessDeniedAlert {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Camera Access Required"
+                                                                   message:@"Please allow camera access in Settings to scan QR codes."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+        [self closeScanner];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Settings" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        NSURL *url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+        if (url) {
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
+        [self closeScanner];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)closeScanner {
+    if (self.navigationController) {
+        [self.navigationController popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
+}
+
 #pragma mark - AV capture methods
 
-- (void)setupCaptureSession {
-    // 1
-    if (_captureSession) return;
-
-    NSString *qrCamSetting = [USER_DEFAULT valueForKey:KEY_QRCodeCam];
-    if (qrCamSetting != nil && [[qrCamSetting uppercaseString] isEqualToString:[VALUE_CAMERA_REAR uppercaseString]])
-    {
-        _videoDevice = [self cameraWithPosition:AVCaptureDevicePositionBack];
-    }
-    else
-    {
-        // Default to front camera for iPad kiosk scanning
-        _videoDevice = [self cameraWithPosition:AVCaptureDevicePositionFront];
-    }
+// Runs on _sessionQueue.
+- (void)configureSessionOnSessionQueue {
+    if (_sessionConfigured) return;
     
-    // If preferred position is not found, fallback to the other position
-    if (!_videoDevice) {
-        if (qrCamSetting != nil && [[qrCamSetting uppercaseString] isEqualToString:[VALUE_CAMERA_REAR uppercaseString]]) {
-            _videoDevice = [self cameraWithPosition:AVCaptureDevicePositionFront];
-        } else {
-            _videoDevice = [self cameraWithPosition:AVCaptureDevicePositionBack];
-        }
-    }
-    
-    if (!_videoDevice) {
-        _videoDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
-    }
-    
-    if (!_videoDevice) {
-        NSLog(@"No video camera on this device!");
+    if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo] != AVAuthorizationStatusAuthorized) {
+        NSLog(@"[Scanner] Camera not authorized; not configuring session.");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_isVisible) {
+                [self showCameraAccessDeniedAlert];
+            } else {
+                self->_showDeniedAlertOnAppear = YES;
+            }
+        });
         return;
     }
-    // 3
-    _captureSession = [[AVCaptureSession alloc] init];
-    // 4
-    _videoInput = [[AVCaptureDeviceInput alloc]
-                   initWithDevice:_videoDevice error:nil];
-    // 5
-    if ([_captureSession canAddInput:_videoInput]) {
-        [_captureSession addInput:_videoInput];
-    }
-    // 6
-    _previewLayer = [[AVCaptureVideoPreviewLayer alloc]
-                     initWithSession:_captureSession];
-    _previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
     
+    NSString *qrCamSetting = [USER_DEFAULT valueForKey:KEY_QRCodeCam];
+    BOOL preferRear = (qrCamSetting != nil && [[qrCamSetting uppercaseString] isEqualToString:[VALUE_CAMERA_REAR uppercaseString]]);
+    // Default to front camera for iPad kiosk scanning; fall back to the other side if missing.
+    AVCaptureDevicePosition preferred = preferRear ? AVCaptureDevicePositionBack : AVCaptureDevicePositionFront;
+    AVCaptureDevicePosition other = preferRear ? AVCaptureDevicePositionFront : AVCaptureDevicePositionBack;
+    
+    NSMutableArray<AVCaptureDevice *> *candidates = [NSMutableArray array];
+    [candidates addObjectsFromArray:[self camerasWithPosition:preferred]];
+    [candidates addObjectsFromArray:[self camerasWithPosition:other]];
+    AVCaptureDevice *defaultDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    if (defaultDevice && ![candidates containsObject:defaultDevice]) {
+        [candidates addObject:defaultDevice];
+    }
+    
+    // Use the first camera whose input can actually be created and added to the session.
+    AVCaptureDevice *device = nil;
+    AVCaptureDeviceInput *input = nil;
+    [_captureSession beginConfiguration];
+    if ([_captureSession canSetSessionPreset:AVCaptureSessionPresetHigh]) {
+        _captureSession.sessionPreset = AVCaptureSessionPresetHigh;
+    }
+    for (AVCaptureDevice *candidate in candidates) {
+        NSError *error = nil;
+        AVCaptureDeviceInput *candidateInput = [AVCaptureDeviceInput deviceInputWithDevice:candidate error:&error];
+        if (candidateInput && [_captureSession canAddInput:candidateInput]) {
+            [_captureSession addInput:candidateInput];
+            device = candidate;
+            input = candidateInput;
+            break;
+        }
+        NSLog(@"[Scanner] Skipping camera %@ (%@): %@", candidate.localizedName, candidate.deviceType, error ?: @"cannot add input");
+    }
+    
+    if (!device) {
+        [_captureSession commitConfiguration];
+        NSLog(@"[Scanner] No usable video camera on this device!");
+        return;
+    }
+    NSLog(@"[Scanner] Using camera: %@ type=%@ position=%ld", device.localizedName, device.deviceType, (long)device.position);
     
     // capture and process the metadata
     _metadataOutput = [[AVCaptureMetadataOutput alloc] init];
@@ -156,61 +260,196 @@
                                           queue:metadataQueue];
     if ([_captureSession canAddOutput:_metadataOutput]) {
         [_captureSession addOutput:_metadataOutput];
+    } else {
+        NSLog(@"[Scanner] Cannot add metadata output!");
+    }
+    
+    // iPadOS can run apps in resizable windows / Stage Manager. Where supported, keep the
+    // camera running instead of being interrupted when other apps are on screen.
+    if (@available(iOS 16.0, *)) {
+        if (_captureSession.isMultitaskingCameraAccessSupported) {
+            _captureSession.multitaskingCameraAccessEnabled = YES;
+        }
+    }
+    [_captureSession commitConfiguration];
+    
+    [self applyMetadataObjectTypes];
+    
+    // Continuous autofocus (where the camera supports it) keeps QR codes sharp.
+    if ([device lockForConfiguration:nil]) {
+        if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
+            device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+        }
+        [device unlockForConfiguration];
+    }
+    
+    _sessionConfigured = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_videoDevice = device;
+        self->_videoInput = input;
+        if (self->_isVisible) {
+            [self setupRotationCoordinator];
+            [self updatePreviewOrientation];
+        }
+    });
+}
+
+// Runs on _sessionQueue. Only QR codes are handled below; asking for every available type also
+// enables face/body/object detection. The available types are only known once the output is
+// connected to a running-capable session, so this is re-checked after the session starts too.
+- (void)applyMetadataObjectTypes {
+    if (!_metadataOutput) return;
+    if ([_metadataOutput.metadataObjectTypes containsObject:AVMetadataObjectTypeQRCode]) return;
+    if ([_metadataOutput.availableMetadataObjectTypes containsObject:AVMetadataObjectTypeQRCode]) {
+        _metadataOutput.metadataObjectTypes = @[AVMetadataObjectTypeQRCode];
+    } else {
+        NSLog(@"[Scanner] QR metadata not available yet: %@", _metadataOutput.availableMetadataObjectTypes);
     }
 }
-// make sure you have this method in your class
-//
-- (AVCaptureDevice *)cameraWithPosition:(AVCaptureDevicePosition)position
+
+// Cameras for a position, in preference order. Some iPads (e.g. iPad 10th gen, iPad Pro / Air
+// with M-series chips) expose the front camera as Ultra Wide and/or TrueDepth only, and the
+// discovery session's device order is not guaranteed, so pick explicitly by type.
+- (NSArray<AVCaptureDevice *> *)camerasWithPosition:(AVCaptureDevicePosition)position
 {
-    if (@available(iOS 10.0, *)) {
-        NSMutableArray *deviceTypes = [NSMutableArray arrayWithObject:AVCaptureDeviceTypeBuiltInWideAngleCamera];
-        if (@available(iOS 13.0, *)) {
-            // Modern iPads (e.g. iPad 9th/10th gen, iPad Pro) use an Ultra Wide camera for Front
-            [deviceTypes addObject:AVCaptureDeviceTypeBuiltInUltraWideCamera];
-        }
-        if (@available(iOS 11.1, *)) {
-            [deviceTypes addObject:AVCaptureDeviceTypeBuiltInTrueDepthCamera];
-        }
-        
-        AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
-            discoverySessionWithDeviceTypes:deviceTypes
-            mediaType:AVMediaTypeVideo
-            position:AVCaptureDevicePositionUnspecified];
-        
-        for (AVCaptureDevice *device in discoverySession.devices)
-        {
-            if ([device position] == position)
-                return device;
+    NSArray *deviceTypes = @[AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                             AVCaptureDeviceTypeBuiltInUltraWideCamera,
+                             AVCaptureDeviceTypeBuiltInTrueDepthCamera];
+    AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
+                                                         discoverySessionWithDeviceTypes:deviceTypes
+                                                         mediaType:AVMediaTypeVideo
+                                                         position:position];
+    NSMutableArray<AVCaptureDevice *> *result = [NSMutableArray array];
+    for (AVCaptureDeviceType type in deviceTypes) {
+        for (AVCaptureDevice *device in discoverySession.devices) {
+            if ([device.deviceType isEqualToString:type] && ![result containsObject:device]) {
+                [result addObject:device];
+            }
         }
     }
-    
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
-#pragma clang diagnostic pop
-    
-    for (AVCaptureDevice *device in devices)
-    {
-        if ([device position] == position)
-            return device;
-    }
-    return nil;
+    return result;
 }
+
 - (void)startRunning {
-    if (_running) return;
-    [_captureSession startRunning];
-    _metadataOutput.metadataObjectTypes =
-    _metadataOutput.availableMetadataObjectTypes;
+    if (_running || !_captureSession) return;
     _running = YES;
+    AVCaptureSession *session = _captureSession;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(_sessionQueue, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf->_sessionConfigured) return;
+        if (!session.isRunning) {
+            [session startRunning];
+            NSLog(@"[Scanner] Session running: %@", session.isRunning ? @"YES" : @"NO");
+        }
+        [strongSelf applyMetadataObjectTypes];
+    });
 }
 - (void)stopRunning {
-    if (!_running) return;
-    [_captureSession stopRunning];
+    if (!_running || !_captureSession) return;
     _running = NO;
+    AVCaptureSession *session = _captureSession;
+    dispatch_async(_sessionQueue, ^{
+        if (session.isRunning) {
+            [session stopRunning];
+        }
+    });
+}
+
+#pragma mark - Session interruptions
+
+- (void)sessionWasInterrupted:(NSNotification *)note {
+    NSNumber *reason = note.userInfo[AVCaptureSessionInterruptionReasonKey];
+    NSLog(@"[Scanner] Session interrupted, reason: %@", reason);
+}
+
+- (void)sessionInterruptionEnded:(NSNotification *)note {
+    NSLog(@"[Scanner] Session interruption ended");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isVisible && !self->_hasScanned) {
+            self->_running = NO;
+            [self startRunning];
+        }
+    });
+}
+
+- (void)sessionRuntimeError:(NSNotification *)note {
+    NSLog(@"[Scanner] Session runtime error: %@", note.userInfo[AVCaptureSessionErrorKey]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_isVisible && !self->_hasScanned) {
+            self->_running = NO;
+            [self startRunning];
+        }
+    });
+}
+
+#pragma mark - Preview orientation
+
+// iOS 17+: AVCaptureDeviceRotationCoordinator gives the correct rotation for this camera
+// (front/back sensor mounting) and the preview layer's actual interface orientation.
+- (void)setupRotationCoordinator {
+    if (@available(iOS 17.0, *)) {
+        if (_rotationCoordinator || !_videoDevice || !_previewLayer) return;
+        _rotationCoordinator = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:_videoDevice previewLayer:_previewLayer];
+        [_rotationCoordinator addObserver:self
+                               forKeyPath:@"videoRotationAngleForHorizonLevelPreview"
+                                  options:NSKeyValueObservingOptionNew
+                                  context:ScannerRotationCoordinatorContext];
+    }
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    if (context == ScannerRotationCoordinatorContext) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self updatePreviewOrientation];
+        });
+    } else {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+}
+
+- (void)updatePreviewOrientation {
+    AVCaptureConnection *connection = _previewLayer.connection;
+    if (!connection) return;
+    
+    if (@available(iOS 17.0, *)) {
+        if (_rotationCoordinator) {
+            CGFloat angle = [(AVCaptureDeviceRotationCoordinator *)_rotationCoordinator videoRotationAngleForHorizonLevelPreview];
+            if ([connection isVideoRotationAngleSupported:angle]) {
+                connection.videoRotationAngle = angle;
+            }
+            return;
+        }
+    }
+    
+    // iOS 15/16: use the window scene's orientation (statusBarOrientation is deprecated and
+    // unreliable with scenes, which made the iPad preview show 180° rotated).
+    UIInterfaceOrientation orientation = [self currentInterfaceOrientation];
+    if (orientation == UIInterfaceOrientationUnknown) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (connection.isVideoOrientationSupported) {
+        connection.videoOrientation = [self videoOrientationFromCurrentDeviceOrientation:orientation];
+    }
+#pragma clang diagnostic pop
+}
+
+- (UIInterfaceOrientation)currentInterfaceOrientation {
+    UIWindowScene *windowScene = self.view.window.windowScene;
+    if (!windowScene) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                windowScene = (UIWindowScene *)scene;
+                break;
+            }
+        }
+    }
+    return windowScene ? windowScene.interfaceOrientation : UIInterfaceOrientationUnknown;
 }
 
 //  handle going foreground/background
 - (void)applicationWillEnterForeground:(NSNotification*)note {
+    if (!_isVisible) return;
     [self startRunning];
     if (!_hasScanned) {
         [self startScanLineAnimation];
@@ -312,33 +551,33 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
                                           NSUInteger idx,
                                           BOOL *stop)
              {
-                 if (self->_hasScanned) {
-                     *stop = YES;
-                     return;
-                 }
-                 if ([obj isKindOfClass:
-                      [AVMetadataMachineReadableCodeObject class]])
-                 {
-                     if ([[obj type] isEqualToString:AVMetadataObjectTypeQRCode]) {
-                         // 3
-                         AVMetadataMachineReadableCodeObject *code =
-                         (AVMetadataMachineReadableCodeObject*)
-                         [self->_previewLayer transformedMetadataObjectForMetadataObject:obj];
-                         if (!code) {
-                             code = (AVMetadataMachineReadableCodeObject*)obj;
-                         }
-                         // 4
-                         Barcode * barcode = [Barcode processMetadataObject:code];
-                         
-                         for(NSString * str in self.allowedBarcodeTypes){
+                if (self->_hasScanned) {
+                    *stop = YES;
+                    return;
+                }
+                if ([obj isKindOfClass:
+                     [AVMetadataMachineReadableCodeObject class]])
+                {
+                    if ([[obj type] isEqualToString:AVMetadataObjectTypeQRCode]) {
+                        // 3
+                        AVMetadataMachineReadableCodeObject *code =
+                        (AVMetadataMachineReadableCodeObject*)
+                        [self->_previewLayer transformedMetadataObjectForMetadataObject:obj];
+                        if (!code) {
+                            code = (AVMetadataMachineReadableCodeObject*)obj;
+                        }
+                        // 4
+                        Barcode * barcode = [Barcode processMetadataObject:code];
+                        
+                        for(NSString * str in self.allowedBarcodeTypes){
                             if([barcode.getBarcodeType isEqualToString:str]){
                                 *stop = YES;
                                 [self validBarcodeFound:barcode];
                                 return;
                             }
-                         }
-                     }
-                 }
+                        }
+                    }
+                }
             }];
         });
     }
@@ -382,19 +621,6 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
     });
 }
 
-- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex{
-    if(buttonIndex == 0){
-        //Code for Done button
-        // TODO: Create a finished view
-    }
-    if(buttonIndex == 1){
-        //Code for Scan more button
-        _hasScanned = NO;
-        [self startRunning];
-        [self startScanLineAnimation];
-    }
-}
-
 - (void) settingsChanged:(NSMutableArray *)allowedTypes{
     for(NSObject * obj in allowedTypes){
         NSLog(@"%@",obj);
@@ -403,6 +629,9 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
         self.allowedBarcodeTypes = [NSMutableArray arrayWithArray:allowedTypes];
     }
 }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+// Used only on iOS 15/16 (AVCaptureVideoOrientation is deprecated from iOS 17).
 - (AVCaptureVideoOrientation) videoOrientationFromCurrentDeviceOrientation:(UIInterfaceOrientation) interfaceOrientation {
     switch (interfaceOrientation) {
         case UIInterfaceOrientationPortrait: {
@@ -417,28 +646,29 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
         case UIInterfaceOrientationPortraitUpsideDown: {
             return AVCaptureVideoOrientationPortraitUpsideDown;
         }
-            default:
+        default:
             return [Common appDelegate].isIpad?AVCaptureVideoOrientationLandscapeLeft:AVCaptureVideoOrientationPortrait;
     }
-//    return [Common appDelegate].isIpad?AVCaptureVideoOrientationLandscapeLeft:AVCaptureVideoOrientationPortrait;
+    //    return [Common appDelegate].isIpad?AVCaptureVideoOrientationLandscapeLeft:AVCaptureVideoOrientationPortrait;
 }
+#pragma clang diagnostic pop
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator
 {
     [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context)
      {
-         UIInterfaceOrientation orientation = [[UIApplication sharedApplication] statusBarOrientation];
-         [self videoOrientationFromCurrentDeviceOrientation:orientation];
-         self.previewView.frame = self.view.bounds;
-         self->_previewLayer.frame = self.previewView.bounds;
-         if (self->_running && !self->_hasScanned) {
-             [self startScanLineAnimation];
-         }
-     } completion:^(id<UIViewControllerTransitionCoordinatorContext> context)
+        self.previewView.frame = self.view.bounds;
+        self->_previewLayer.frame = self.previewView.bounds;
+        [self updatePreviewOrientation];
+        if (self->_running && !self->_hasScanned) {
+            [self startScanLineAnimation];
+        }
+    } completion:^(id<UIViewControllerTransitionCoordinatorContext> context)
      {
-         if (self->_running && !self->_hasScanned) {
-             [self startScanLineAnimation];
-         }
-     }];
+        [self updatePreviewOrientation];
+        if (self->_running && !self->_hasScanned) {
+            [self startScanLineAnimation];
+        }
+    }];
     
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
 }

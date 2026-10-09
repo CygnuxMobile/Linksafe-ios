@@ -57,6 +57,7 @@
 static void * CapturingStillImageContext = &CapturingStillImageContext;
 static void * RecordingContext = &RecordingContext;
 static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDeviceAuthorizedContext;
+static void * RotationCoordinatorContext = &RotationCoordinatorContext;
 
 @interface AVCamViewController () <AVCaptureFileOutputRecordingDelegate, AVCapturePhotoCaptureDelegate>
 
@@ -84,6 +85,7 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 @property (weak, nonatomic) IBOutlet UIButton *btnCancel;
 
 @property (nonatomic) BOOL isStartTimer;
+@property (nonatomic) id rotationCoordinator; // AVCaptureDeviceRotationCoordinator (iOS 17+)
 
 @end
 
@@ -193,14 +195,127 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 	return ![self lockInterfaceRotation];
 }
 
-- (NSUInteger)supportedInterfaceOrientations
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
 {
 	return UIInterfaceOrientationMaskAll;
 }
 
-- (void)willRotateToInterfaceOrientation:(UIInterfaceOrientation)toInterfaceOrientation duration:(NSTimeInterval)duration
+// -willRotateToInterfaceOrientation:duration: is no longer called on current iOS versions, so the
+// preview stayed 180° rotated when the iPad was in (or turned to) the other landscape side.
+- (void)viewDidAppear:(BOOL)animated
 {
-	[[(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection] setVideoOrientation:(AVCaptureVideoOrientation)toInterfaceOrientation];
+	[super viewDidAppear:animated];
+	// The preview layer is in a window now, so (re)create the coordinator against its real orientation.
+	AVCaptureDevice *device = [[self videoDeviceInput] device];
+	if (device) {
+		[self setRotationCoordinatorForDevice:device];
+	} else {
+		[self updatePreviewOrientation];
+	}
+}
+
+- (void)viewDidLayoutSubviews
+{
+	[super viewDidLayoutSubviews];
+	[self updatePreviewOrientation];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator
+{
+	[super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+	[coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+		[self updatePreviewOrientation];
+	}];
+}
+
+- (void)dealloc
+{
+	if (_rotationCoordinator) {
+		[_rotationCoordinator removeObserver:self forKeyPath:@"videoRotationAngleForHorizonLevelPreview" context:RotationCoordinatorContext];
+	}
+}
+
+#pragma mark - Orientation
+
+// iOS 17+: AVCaptureDeviceRotationCoordinator gives the right angle for this camera (front/back
+// sensor mounting) and for the preview layer's real interface orientation.
+// Must be called on the main queue.
+- (void)setRotationCoordinatorForDevice:(AVCaptureDevice *)device
+{
+	if (@available(iOS 17.0, *)) {
+		if (self.rotationCoordinator) {
+			[self.rotationCoordinator removeObserver:self forKeyPath:@"videoRotationAngleForHorizonLevelPreview" context:RotationCoordinatorContext];
+			self.rotationCoordinator = nil;
+		}
+		if (device) {
+			AVCaptureVideoPreviewLayer *previewLayer = (AVCaptureVideoPreviewLayer *)[[self previewView] layer];
+			self.rotationCoordinator = [[AVCaptureDeviceRotationCoordinator alloc] initWithDevice:device previewLayer:previewLayer];
+			[self.rotationCoordinator addObserver:self forKeyPath:@"videoRotationAngleForHorizonLevelPreview" options:NSKeyValueObservingOptionNew context:RotationCoordinatorContext];
+		}
+	}
+	[self updatePreviewOrientation];
+}
+
+- (UIInterfaceOrientation)currentInterfaceOrientation
+{
+	UIWindowScene *windowScene = self.view.window.windowScene;
+	if (!windowScene) {
+		for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+			if ([scene isKindOfClass:[UIWindowScene class]]) {
+				windowScene = (UIWindowScene *)scene;
+				break;
+			}
+		}
+	}
+	return windowScene ? windowScene.interfaceOrientation : UIInterfaceOrientationUnknown;
+}
+
+- (void)updatePreviewOrientation
+{
+	AVCaptureConnection *connection = [(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection];
+	if (!connection) return;
+	
+	if (@available(iOS 17.0, *)) {
+		if (self.rotationCoordinator) {
+			CGFloat angle = [(AVCaptureDeviceRotationCoordinator *)self.rotationCoordinator videoRotationAngleForHorizonLevelPreview];
+			if ([connection isVideoRotationAngleSupported:angle]) {
+				connection.videoRotationAngle = angle;
+			}
+			return;
+		}
+	}
+	
+	// iOS 15/16 fallback. UIInterfaceOrientation and AVCaptureVideoOrientation share raw values.
+	UIInterfaceOrientation orientation = [self currentInterfaceOrientation];
+	if (orientation == UIInterfaceOrientationUnknown) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	if (connection.isVideoOrientationSupported) {
+		connection.videoOrientation = (AVCaptureVideoOrientation)orientation;
+	}
+#pragma clang diagnostic pop
+}
+
+// Rotates an output connection (photo / movie) so the captured image is upright.
+- (void)applyCaptureOrientationToConnection:(AVCaptureConnection *)connection
+{
+	if (!connection) return;
+	if (@available(iOS 17.0, *)) {
+		if (self.rotationCoordinator) {
+			CGFloat angle = [(AVCaptureDeviceRotationCoordinator *)self.rotationCoordinator videoRotationAngleForHorizonLevelCapture];
+			if ([connection isVideoRotationAngleSupported:angle]) {
+				connection.videoRotationAngle = angle;
+			}
+			return;
+		}
+	}
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	AVCaptureVideoOrientation previewOrientation = [[(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection] videoOrientation];
+	if (connection.isVideoOrientationSupported) {
+		connection.videoOrientation = previewOrientation;
+	}
+#pragma clang diagnostic pop
 }
 
 
@@ -220,6 +335,12 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 	}
 	else if (context == SessionRunningAndDeviceAuthorizedContext)
 	{
+	}
+	else if (context == RotationCoordinatorContext)
+	{
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self updatePreviewOrientation];
+		});
 	}
 	else
 	{
@@ -246,6 +367,16 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
     
     dispatch_queue_t sessionQueue = dispatch_queue_create("session queue", DISPATCH_QUEUE_SERIAL);
     [self setSessionQueue:sessionQueue];
+    
+    // Hold session setup until the user answers the camera prompt (first launch / new device);
+    // otherwise the preview can stay black after tapping "Allow".
+    if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo] == AVAuthorizationStatusNotDetermined)
+    {
+        dispatch_suspend(sessionQueue);
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
+            dispatch_resume(sessionQueue);
+        }];
+    }
     
     dispatch_async(sessionQueue, ^{
         [self setBackgroundRecordingID:UIBackgroundTaskInvalid];
@@ -287,13 +418,7 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
                 // Because AVCaptureVideoPreviewLayer is the backing layer for AVCamPreviewView and UIView can only be manipulated on main thread.
                 // Note: As an exception to the above rule, it is not necessary to serialize video orientation changes on the AVCaptureVideoPreviewLayer's connection with other session manipulation.
                 
-                // Fix: self.interfaceOrientation was removed in iOS 16. Use UIWindowScene instead.
-                AVCaptureVideoOrientation videoOrientation = AVCaptureVideoOrientationPortrait;
-                UIWindowScene *windowScene = (UIWindowScene *)[[[[UIApplication sharedApplication] connectedScenes] allObjects] firstObject];
-                if (windowScene) {
-                    videoOrientation = (AVCaptureVideoOrientation)windowScene.interfaceOrientation;
-                }
-                [[(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection] setVideoOrientation:videoOrientation];
+                [self setRotationCoordinatorForDevice:videoDevice];
             });
         }
         
@@ -317,7 +442,7 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
             [session addOutput:movieFileOutput];
             AVCaptureConnection *connection = [movieFileOutput connectionWithMediaType:AVMediaTypeVideo];
             if ([connection isVideoStabilizationSupported])
-                [connection setEnablesVideoStabilizationWhenAvailable:YES];
+                connection.preferredVideoStabilizationMode = AVCaptureVideoStabilizationModeAuto;
             [self setMovieFileOutput:movieFileOutput];
         }
         
@@ -353,10 +478,7 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 			}
 			
 			// Update the orientation on the movie file output video connection before starting recording.
-			[[[self movieFileOutput] connectionWithMediaType:AVMediaTypeVideo] setVideoOrientation:[[(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection] videoOrientation]];
-			
-			// Turning OFF flash for video recording
-			[AVCamViewController setFlashMode:AVCaptureFlashModeOff forDevice:[[self videoDeviceInput] device]];
+			[self applyCaptureOrientationToConnection:[[self movieFileOutput] connectionWithMediaType:AVMediaTypeVideo]];
 			
 			// Start recording to a temporary file.
 			NSString *outputFilePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"movie" stringByAppendingPathExtension:@"mov"]];
@@ -403,7 +525,6 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 		{
 			[[NSNotificationCenter defaultCenter] removeObserver:self name:AVCaptureDeviceSubjectAreaDidChangeNotification object:currentVideoDevice];
 			
-			[AVCamViewController setFlashMode:AVCaptureFlashModeAuto forDevice:videoDevice];
 			[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(subjectAreaDidChange:) name:AVCaptureDeviceSubjectAreaDidChangeNotification object:videoDevice];
 			
 			[[self session] addInput:videoDeviceInput];
@@ -416,7 +537,10 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 		
 		[[self session] commitConfiguration];
 		
+		AVCaptureDevice *activeDevice = [[self videoDeviceInput] device];
 		dispatch_async(dispatch_get_main_queue(), ^{
+			// The coordinator is per camera, so recreate it for the new one.
+			[self setRotationCoordinatorForDevice:activeDevice];
 //			[[self btnChangeCamera] setEnabled:YES];
 //			[[self btnRecord] setEnabled:YES];
 //			[[self btnCapture] setEnabled:YES];
@@ -457,10 +581,7 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
     // regardless of how the device is held, causing rotated photos.
     AVCaptureConnection *photoConnection = [self.photoOutput connectionWithMediaType:AVMediaTypeVideo];
     if (photoConnection) {
-        AVCaptureVideoOrientation currentOrientation = [[(AVCaptureVideoPreviewLayer *)[[self previewView] layer] connection] videoOrientation];
-        if (photoConnection.isVideoOrientationSupported) {
-            photoConnection.videoOrientation = currentOrientation;
-        }
+        [self applyCaptureOrientationToConnection:photoConnection];
         
         // Mirror for front camera so the photo matches what the user sees in preview
         AVCaptureDevicePosition currentPosition = [[self videoDeviceInput] device].position;
@@ -469,15 +590,11 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
         }
     }
     
-    // Flash set to Auto for Still Capture
-    [AVCamViewController setFlashMode:AVCaptureFlashModeAuto forDevice:[[self videoDeviceInput] device]];
-    
     // Capture photo using modern AVCapturePhotoOutput
-    AVCapturePhotoSettings *settings;
-    if (@available(iOS 11.0, *)) {
-        settings = [AVCapturePhotoSettings photoSettingsWithFormat:@{AVVideoCodecKey: AVVideoCodecTypeJPEG}];
-    } else {
-        settings = [AVCapturePhotoSettings photoSettings];
+    AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettingsWithFormat:@{AVVideoCodecKey: AVVideoCodecTypeJPEG}];
+    // Flash Auto for still capture (AVCaptureDevice.flashMode is deprecated; it is set per photo now)
+    if ([self.photoOutput.supportedFlashModes containsObject:@(AVCaptureFlashModeAuto)]) {
+        settings.flashMode = AVCaptureFlashModeAuto;
     }
     [self.photoOutput capturePhotoWithSettings:settings delegate:self];
 }
@@ -588,52 +705,33 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 	});
 }
 
-+ (void)setFlashMode:(AVCaptureFlashMode)flashMode forDevice:(AVCaptureDevice *)device
-{
-	if ([device hasFlash] && [device isFlashModeSupported:flashMode])
-	{
-		NSError *error = nil;
-		if ([device lockForConfiguration:&error])
-		{
-			[device setFlashMode:flashMode];
-			[device unlockForConfiguration];
-		}
-		else
-		{
-			NSLog(@"%@", error);
-		}
-	}
-}
-
 + (AVCaptureDevice *)deviceWithMediaType:(NSString *)mediaType preferringPosition:(AVCaptureDevicePosition)position
 {
-    // Fix: devicesWithMediaType: deprecated — use AVCaptureDeviceDiscoverySession
-    NSArray *devices;
-    if (@available(iOS 10.0, *)) {
-        AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
-            discoverySessionWithDeviceTypes:@[AVCaptureDeviceTypeBuiltInWideAngleCamera]
-            mediaType:mediaType
-            position:AVCaptureDevicePositionUnspecified];
-        devices = discoverySession.devices;
-    } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        devices = [AVCaptureDevice devicesWithMediaType:mediaType];
-#pragma clang diagnostic pop
+    // Some iPads (e.g. iPad 10th gen, iPad Pro / Air with M-series chips) expose the front camera
+    // as Ultra Wide and/or TrueDepth only, so search those types too, in preference order.
+    // (devicesWithMediaType: is deprecated; AVCaptureDeviceDiscoverySession works on all supported iOS versions.)
+    NSArray *deviceTypes = @[AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                             AVCaptureDeviceTypeBuiltInUltraWideCamera,
+                             AVCaptureDeviceTypeBuiltInTrueDepthCamera];
+    AVCaptureDeviceDiscoverySession *discoverySession = [AVCaptureDeviceDiscoverySession
+        discoverySessionWithDeviceTypes:deviceTypes
+        mediaType:mediaType
+        position:AVCaptureDevicePositionUnspecified];
+    NSArray *devices = discoverySession.devices;
+    
+    for (AVCaptureDeviceType type in deviceTypes)
+    {
+        for (AVCaptureDevice *device in devices)
+        {
+            if ([device position] == position && [device.deviceType isEqualToString:type])
+            {
+                return device;
+            }
+        }
     }
-
-    AVCaptureDevice *captureDevice = [devices firstObject];
-	
-	for (AVCaptureDevice *device in devices)
-	{
-		if ([device position] == position)
-		{
-			captureDevice = device;
-			break;
-		}
-	}
-	
-	return captureDevice;
+    
+    // Requested side not available: use any camera rather than none.
+    return [devices firstObject] ?: [AVCaptureDevice defaultDeviceWithMediaType:mediaType];
 }
 
 #pragma mark UI
@@ -662,11 +760,12 @@ static void * SessionRunningAndDeviceAuthorizedContext = &SessionRunningAndDevic
 		{
 			//Not granted access to mediaType
 			dispatch_async(dispatch_get_main_queue(), ^{
-				[[[UIAlertView alloc] initWithTitle:@"AVCam!"
-											message:@"AVCam doesn't have permission to use Camera, please change privacy settings"
-										   delegate:self
-								  cancelButtonTitle:@"OK"
-								  otherButtonTitles:nil] show];
+				// UIAlertView is deprecated; use UIAlertController.
+				UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Camera Access"
+																			   message:@"Camera permission is turned off. Please allow camera access in Settings."
+																		preferredStyle:UIAlertControllerStyleAlert];
+				[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+				[self presentViewController:alert animated:YES completion:nil];
 				[self setDeviceAuthorized:NO];
 			});
 		}
